@@ -207,9 +207,9 @@ objc_object::initIsa(Class cls, bool nonpointer, bool hasCxxDtor)
 { 
     assert(!isTaggedPointer()); 
     
-    if (!nonpointer) {
+    if (!nonpointer) { // 如果没有启用isa 优化，则直接将cls赋值给isa.cls，来表明当前object 是哪个类的实例
         isa.cls = cls;
-    } else {
+    } else { // 如果启用了isa 优化，则初始化isa的三个内容(1) isa基本的内容，包括nonpointer置1以及设置OC magic vaule (2)置位has_cxx_dtor (3) 记录对象所属类的信息。 通过 newisa.shiftcls = (uintptr_t)cls >> 3;
         assert(!DisableNonpointerIsa);
         assert(!cls->instancesRequireRawIsa());
 
@@ -470,6 +470,7 @@ objc_object::rootTryRetain()
 ALWAYS_INLINE id 
 objc_object::rootRetain(bool tryRetain, bool handleOverflow)
 {
+    // 如果开启了taggedpointer优化时候,直接就将自己返回.
     if (isTaggedPointer()) return (id)this;
 
     bool sideTableLocked = false;
@@ -482,11 +483,11 @@ objc_object::rootRetain(bool tryRetain, bool handleOverflow)
         transcribeToSideTable = false;
         oldisa = LoadExclusive(&isa.bits);
         newisa = oldisa;
-        if (slowpath(!newisa.nonpointer)) {
+        if (slowpath(!newisa.nonpointer)) { // 如果没有采用isa优化, 则返回sidetable记录的内容, 用slowpath表明这不是一个大概率事件
             ClearExclusive(&isa.bits);
             if (!tryRetain && sideTableLocked) sidetable_unlock();
             if (tryRetain) return sidetable_tryRetain() ? (id)this : nil;
-            else return sidetable_retain();
+            else return sidetable_retain(); // 返回sidetable中这个对象记录的数据
         }
         // don't check newisa.fast_rr; we already called any RR overrides
         if (slowpath(tryRetain && newisa.deallocating)) {
@@ -494,26 +495,29 @@ objc_object::rootRetain(bool tryRetain, bool handleOverflow)
             if (!tryRetain && sideTableLocked) sidetable_unlock();
             return nil;
         }
+        
+        // 采用了isa优化，做extra_rc++，同时检查是否extra_rc溢出，若溢出，则extra_rc减半，并将另一半转存至sidetable
         uintptr_t carry;
         newisa.bits = addc(newisa.bits, RC_ONE, 0, &carry);  // extra_rc++
 
-        if (slowpath(carry)) {
+        if (slowpath(carry)) { // 有carry值，表示extra_rc 溢出
             // newisa.extra_rc++ overflowed
-            if (!handleOverflow) {
+            if (!handleOverflow) { // 如果不处理溢出情况，则在这里会递归调用一次，再进来的时候，handleOverflow会被rootRetain_overflow设置为true，从而进入到下面的溢出处理流程
                 ClearExclusive(&isa.bits);
                 return rootRetain_overflow(tryRetain);
             }
             // Leave half of the retain counts inline and 
             // prepare to copy the other half to the side table.
             if (!tryRetain && !sideTableLocked) sidetable_lock();
+            // 进行溢出处理：逻辑很简单，先在extra_rc中留一半计数，同时把has_sidetable_rc设置为true，表明借用了sidetable，然后把另一半放到sidetable中
             sideTableLocked = true;
             transcribeToSideTable = true;
             newisa.extra_rc = RC_HALF;
             newisa.has_sidetable_rc = true;
         }
-    } while (slowpath(!StoreExclusive(&isa.bits, oldisa.bits, newisa.bits)));
+    } while (slowpath(!StoreExclusive(&isa.bits, oldisa.bits, newisa.bits))); // 将oldisa 替换为 newisa，并赋值给isa.bits(更新isa_t), 如果不成功，do while再试一遍
 
-    if (slowpath(transcribeToSideTable)) {
+    if (slowpath(transcribeToSideTable)) { //isa的extra_rc溢出，将一半的refer count值放到sidetable中
         // Copy the other half of the retain counts to the side table.
         sidetable_addExtraRC_nolock(RC_HALF);
     }
@@ -710,21 +714,23 @@ objc_object::rootAutorelease()
 inline uintptr_t 
 objc_object::rootRetainCount()
 {
+    //  如果是tagged pointer，则直接返回this，因为tagged pointer是不需要引用计数的
     if (isTaggedPointer()) return (uintptr_t)this;
-
+    // 将objcet对应的sidetable上锁
     sidetable_lock();
     isa_t bits = LoadExclusive(&isa.bits);
     ClearExclusive(&isa.bits);
+    // 如果采用了优化的isa指针
     if (bits.nonpointer) {
-        uintptr_t rc = 1 + bits.extra_rc;
-        if (bits.has_sidetable_rc) {
-            rc += sidetable_getExtraRC_nolock();
+        uintptr_t rc = 1 + bits.extra_rc; // 先读取isa.extra_rc
+        if (bits.has_sidetable_rc) { // 如果extra_rc不够大， 还需要读取sidetable中的数据
+            rc += sidetable_getExtraRC_nolock(); // 总引用计数= rc + sidetable count
         }
         sidetable_unlock();
         return rc;
     }
-
-    sidetable_unlock();
+     // 如果没采用优化的isa指针，则直接返回sidetable中的值
+    sidetable_unlock(); // 将objcet对应的sidetable解锁，因为sidetable_retainCount()中会上锁
     return sidetable_retainCount();
 }
 
