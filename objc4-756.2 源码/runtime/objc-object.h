@@ -423,6 +423,8 @@ objc_object::rootDealloc()
                  !isa.has_cxx_dtor  &&  
                  !isa.has_sidetable_rc))
     {
+        // 如果没有weak引用 & 没有关联对象 & 没有c++析构 & 没有side table借位
+        // 就直接free
         assert(!sidetable_present());
         free(this);
     } 

@@ -355,9 +355,10 @@ weak_unregister_no_lock(weak_table_t *weak_table, id referent_id,
 
     if (!referent) return;
 
-    if ((entry = weak_entry_for_referent(weak_table, referent))) {
-        remove_referrer(entry, referrer);
+    if ((entry = weak_entry_for_referent(weak_table, referent))) { // 查找到referent所对应的weak_entry_t
+        remove_referrer(entry, referrer);  // 在referent所对应的weak_entry_t的hash数组中，移除referrer
         bool empty = true;
+        // 移除元素之后， 要检查一下weak_entry_t的hash数组是否已经空了
         if (entry->out_of_line()  &&  entry->num_refs != 0) {
             empty = false;
         }
@@ -370,7 +371,7 @@ weak_unregister_no_lock(weak_table_t *weak_table, id referent_id,
             }
         }
 
-        if (empty) {
+        if (empty) { // 如果weak_entry_t的hash数组已经空了，则需要将weak_entry_t从weak_table中移除
             weak_entry_remove(weak_table, entry);
         }
     }

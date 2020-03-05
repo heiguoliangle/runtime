@@ -280,20 +280,21 @@ storeWeak(id *location, objc_object *newObj)
     // Order by lock address to prevent lock ordering problems. 
     // Retry if the old value changes underneath us.
  retry:
-    if (haveOld) {
+    if (haveOld) {  // 如果weak ptr之前弱引用过一个obj，则将这个obj所对应的SideTable取出，赋值给oldTable
         oldObj = *location;
         oldTable = &SideTables()[oldObj];
     } else {
-        oldTable = nil;
+        oldTable = nil;  // 如果weak ptr之前没有弱引用过一个obj，则oldTable = nil
     }
     if (haveNew) {
         newTable = &SideTables()[newObj];
     } else {
-        newTable = nil;
+        newTable = nil; // 如果weak ptr不需要引用一个新obj，则newTable = nil
     }
-
+    // 加锁操作，防止多线程中竞争冲突
     SideTable::lockTwo<haveOld, haveNew>(oldTable, newTable);
 
+    // location 应该与 oldObj 保持一致，如果不同，说明当前的 location 已经处理过 oldObj 可是又被其他线程所修改
     if (haveOld  &&  *location != oldObj) {
         SideTable::unlockTwo<haveOld, haveNew>(oldTable, newTable);
         goto retry;
@@ -305,7 +306,7 @@ storeWeak(id *location, objc_object *newObj)
     if (haveNew  &&  newObj) {
         Class cls = newObj->getIsa();
         if (cls != previouslyInitializedClass  &&  
-            !((objc_class *)cls)->isInitialized()) 
+            !((objc_class *)cls)->isInitialized()) // 如果cls还没有初始化，先初始化，再尝试设置weak
         {
             SideTable::unlockTwo<haveOld, haveNew>(oldTable, newTable);
             class_initialize(cls, (id)newObj);
@@ -328,27 +329,30 @@ storeWeak(id *location, objc_object *newObj)
     }
 
     // Assign new value, if any.
-    if (haveNew) {
+    if (haveNew) { // 如果weak_ptr需要弱引用新的对象newObj
+         // (1) 调用weak_register_no_lock方法，将weak ptr的地址记录到newObj对应的weak_entry_t中
         newObj = (objc_object *)
             weak_register_no_lock(&newTable->weak_table, (id)newObj, location, 
                                   crashIfDeallocating);
         // weak_register_no_lock returns nil if weak store should be rejected
 
         // Set is-weakly-referenced bit in refcount table.
+         // (2) 更新newObj的isa的weakly_referenced bit标志位
         if (newObj  &&  !newObj->isTaggedPointer()) {
             newObj->setWeaklyReferenced_nolock();
         }
 
         // Do not set *location anywhere else. That would introduce a race.
+         // （3）*location 赋值，也就是将weak ptr直接指向了newObj。可以看到，这里并没有将newObj的引用计数+1
         *location = (id)newObj;
     }
     else {
         // No new value. The storage is not changed.
     }
-    
+     // 解锁，其他线程可以访问oldTable, newTable了
     SideTable::unlockTwo<haveOld, haveNew>(oldTable, newTable);
 
-    return (id)newObj;
+    return (id)newObj;// 返回newObj，此时的newObj与刚传入时相比，weakly-referenced bit位置1
 }
 
 
