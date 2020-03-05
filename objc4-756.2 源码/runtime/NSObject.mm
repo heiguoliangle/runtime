@@ -240,15 +240,15 @@ objc_retain_autorelease(id obj)
 
 
 void
-objc_storeStrong(id *location, id obj)
+objc_storeStrong(id *location, id obj) // location 引用指针,obj 实例对象
 {
     id prev = *location;
     if (obj == prev) {
         return;
     }
-    objc_retain(obj);
-    *location = obj;
-    objc_release(prev);
+    objc_retain(obj); //1.  retain obj
+    *location = obj; //2.  将location 指向 obj
+    objc_release(prev); //3. release location之前指向的obj
 }
 
 
@@ -657,13 +657,13 @@ class AutoreleasePoolPage
 #endif
     static size_t const COUNT = SIZE / sizeof(id);
 
-    magic_t const magic;
-    id *next;
-    pthread_t const thread;
-    AutoreleasePoolPage * const parent;
-    AutoreleasePoolPage *child;
-    uint32_t const depth;
-    uint32_t hiwat;
+    magic_t const magic; // 魔数，用于自身的完整性校验                                                         16字节
+    id *next; // 指向autorelePool page中的下一个可用位置                                           8字节
+    pthread_t const thread; // 和autorelePool page中相关的线程                                                  8字节
+    AutoreleasePoolPage * const parent; // autoreleasPool page双向链表的前向指针                                             8字节
+    AutoreleasePoolPage *child; // autoreleasPool page双向链表的后向指针                                             8字节
+    uint32_t const depth; // 当前autoreleasPool page在双向链表中的位置（深度）                                   4字节
+    uint32_t hiwat; // high water mark. 最高水位，可用近似理解为autoreleasPool page双向链表中的元素个数       4字节
 
     // SIZE-sizeof(*this) bytes of contents follow
 
@@ -769,7 +769,7 @@ class AutoreleasePoolPage
     bool lessThanHalfFull() {
         return (next - begin() < (end() - begin()) / 2);
     }
-
+    // 将obj置于next的位置，next++，然后返回obj的位置
     id *add(id obj)
     {
         assert(!full());
@@ -896,6 +896,7 @@ class AutoreleasePoolPage
         return EMPTY_POOL_PLACEHOLDER;
     }
 
+    // hotPage是autoreleasePage链表中正在使用的autoreleasePage节点。实质上是指向autoreleasepage的指针，并存储于线程的TSD(线程私有数据：Thread-specific Data)中
     static inline AutoreleasePoolPage *hotPage() 
     {
         AutoreleasePoolPage *result = (AutoreleasePoolPage *)
@@ -923,15 +924,15 @@ class AutoreleasePoolPage
         return result;
     }
 
-
+    // 将一个id放入到autoreleasePage中
     static inline id *autoreleaseFast(id obj)
     {
         AutoreleasePoolPage *page = hotPage();
-        if (page && !page->full()) {
+        if (page && !page->full()) { // next == end
             return page->add(obj);
-        } else if (page) {
+        } else if (page) { // 启动新的page
             return autoreleaseFullPage(obj, page);
-        } else {
+        } else {// 当前的线程还未建立起autorelease pool
             return autoreleaseNoPage(obj);
         }
     }
@@ -944,12 +945,12 @@ class AutoreleasePoolPage
         // Then add the object to that page.
         assert(page == hotPage());
         assert(page->full()  ||  DebugPoolAllocation);
-
+        // 创建新的或返回一个合适的
         do {
             if (page->child) page = page->child;
             else page = new AutoreleasePoolPage(page);
         } while (page->full());
-
+        // 存储到tsd中
         setHotPage(page);
         return page->add(obj);
     }
@@ -962,14 +963,14 @@ class AutoreleasePoolPage
         assert(!hotPage());
 
         bool pushExtraBoundary = false;
-        if (haveEmptyPoolPlaceholder()) {
+        if (haveEmptyPoolPlaceholder()) { // 如果当前线程只有一个虚拟的空池，则这次需要真正创建一个page
             // We are pushing a second pool over the empty placeholder pool
             // or pushing the first object into the empty placeholder pool.
             // Before doing that, push a pool boundary on behalf of the pool 
             // that is currently represented by the empty placeholder.
             pushExtraBoundary = true;
         }
-        else if (obj != POOL_BOUNDARY  &&  DebugMissingPools) {
+        else if (obj != POOL_BOUNDARY  &&  DebugMissingPools) {  POOL_BOUNDARY，这里苹果有个小心机，它不会真正创建page，而是在线程的TSD中做了一个空池的标志
             // We are pushing an object with no pool in place, 
             // and no-pool debugging was requested by environment.
             _objc_inform("MISSING POOLS: (%p) Object %p of class %s "
@@ -980,7 +981,7 @@ class AutoreleasePoolPage
             objc_autoreleaseNoPool(obj);
             return nil;
         }
-        else if (obj == POOL_BOUNDARY  &&  !DebugPoolAllocation) {
+        else if (obj == POOL_BOUNDARY  &&  !DebugPoolAllocation) { // 如果obj ==
             // We are pushing a pool with no pool in place,
             // and alloc-per-pool debugging was not requested.
             // Install and return the empty pool placeholder.
@@ -990,10 +991,12 @@ class AutoreleasePoolPage
         // We are pushing an object or a non-placeholder'd pool.
 
         // Install the first page.
+        // 创建线程的第一个page，并置为hot page。
         AutoreleasePoolPage *page = new AutoreleasePoolPage(nil);
         setHotPage(page);
         
         // Push a boundary on behalf of the previously-placeholder'd pool.
+        // 如果之前只是做了空池标记，这里还需要在栈中补上POOL_BOUNDARY，作为栈底哨兵
         if (pushExtraBoundary) {
             page->add(POOL_BOUNDARY);
         }
@@ -1012,6 +1015,7 @@ class AutoreleasePoolPage
     }
 
 public:
+    // 将某个特定的对象指针插入到AutoreleasePoolPage中：
     static inline id autorelease(id obj)
     {
         assert(obj);
@@ -1021,7 +1025,7 @@ public:
         return obj;
     }
 
-
+    // 当用户调用@autoreleasepool{}的时候，系统首先会调用AutoreleasePoolPage::push()方法
     static inline void *push() 
     {
         id *dest;
@@ -1060,6 +1064,7 @@ public:
         objc_autoreleasePoolInvalid(token);
     }
     
+    // 接受一个void *token参数，来告诉池子，需要一直释放到token对应的那个page
     static inline void pop(void *token) 
     {
         AutoreleasePoolPage *page;
@@ -1093,7 +1098,7 @@ public:
         }
 
         if (PrintPoolHiwat) printHiwat();
-
+        // 对page中的object做objc_release操作，一直到stop
         page->releaseUntil(stop);
 
         // memory: delete empty children
@@ -1680,7 +1685,7 @@ _objc_rootAutorelease(id obj)
     assert(obj);
     return obj->rootAutorelease();
 }
-
+// 获取对象引用计数
 uintptr_t
 _objc_rootRetainCount(id obj)
 {
