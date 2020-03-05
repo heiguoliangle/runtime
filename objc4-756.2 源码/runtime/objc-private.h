@@ -67,6 +67,16 @@ union isa_t {
 #if defined(ISA_BITFIELD)
     struct {
         ISA_BITFIELD;  // defined in isa.h
+        
+//        uintptr_t nonpointer        : 1;
+//        uintptr_t has_assoc         : 1;
+//        uintptr_t has_cxx_dtor      : 1;
+//        uintptr_t shiftcls          : 33;
+//        uintptr_t magic             : 6;
+//        uintptr_t weakly_referenced : 1;
+//        uintptr_t deallocating      : 1;
+//        uintptr_t has_sidetable_rc  : 1;
+//        uintptr_t extra_rc          : 19
     };
 #endif
 };
